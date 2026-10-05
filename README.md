@@ -264,6 +264,31 @@ snapshot demo, and rebuilds the Elasticsearch index.
 > command times out. That is expected: judge success by the log line
 > `Seed data initialization completed!`, not by the exit code.
 
+### Product catalog seed (3,000 products)
+
+```bash
+docker compose build seed
+docker compose --profile tools run --rm catalog-seed          # top up to the target
+CATALOG_RESET=true docker compose --profile tools run --rm catalog-seed   # optional rebuild
+```
+
+Separate from the demo seeder and gated behind the `catalog` profile, so it never runs on a
+normal application start. It generates deterministic products (`RANDOM_SEED = 20261005`) on top
+of the 27 demo rows — the final catalog is demo + generated, ≈ 3,027 products across 31 categories.
+
+- **Idempotent** — a second run inserts nothing (`nothing to insert`).
+- **Never overwrites** — every existing SKU and title is reserved, so demo products are stepped
+  around rather than replaced; generated SKUs use the `ABC-1234` namespace, demo SKUs `ABC-123`.
+- **Validated artwork** — `backend/src/main/resources/catalog/image-pool.json` lists the 51 shared
+  SVGs in `frontend/public/products/`; an unmapped category aborts the run instead of writing a
+  broken `image_url`. No per-product image files are created.
+- **Exits 0/1** by design (`--rm` leaves no container behind). `CATALOG_RESET=true` deletes only
+  the generated slice first; the demo products and all orders are untouched.
+- The run ends with a verification block: totals, active/inactive, category list, SKU/title
+  uniqueness, `image_url` coverage and distinct artwork in use.
+
+`CATALOG_PRODUCT_COUNT` (default `3000`) sets the target.
+
 ### Running the backend without Docker
 
 ```bash
@@ -321,7 +346,7 @@ JWT, **ADMIN** = `ROLE_ADMIN`.
 | POST | `/api/auth/login` | verify credentials, issue JWT | public |
 | POST | `/api/auth/logout` | acknowledge logout (client-side) | public |
 | GET | `/api/auth/me` | current user from the token | public |
-| GET | `/api/products` | list / filter / sort / paginate catalog | public |
+| GET | `/api/products` | list / filter / sort catalog (`cursor` or `page`) | public |
 | GET | `/api/products/facets` | category + tag facet counts | public |
 | GET | `/api/products/{id}` | single product | public |
 | POST | `/api/products` | create product | ADMIN |
@@ -344,12 +369,15 @@ API request/response keys are **snake_case** (`order_number`, `min_price`, `date
 ## 13. Testing and verification
 
 ```bash
-# Java compilation
-cd backend && mvn clean package -DskipTests
+# Java build + unit tests (cursor, catalog generator, image pool)
+cd backend && mvn clean package
 
 # Frontend build and tests
 cd frontend && npm run build
 cd frontend && npm test -- --run
+
+# End-to-end storefront checks (needs the stack running on :5173 / :8000)
+cd frontend && npm run test:e2e
 
 # Stack
 docker compose up --build -d
@@ -359,7 +387,10 @@ docker compose ps
 curl http://localhost:8000/api/health
 
 # Catalog (MongoDB-backed)
-curl http://localhost:8000/api/products?limit=5
+curl -s 'http://localhost:8000/api/products?limit=5'
+
+# Cursor walk — has_more flips to false and next_cursor to null at the end
+curl -s 'http://localhost:8000/api/products?limit=100' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["items"]), d["total"], d["has_more"], bool(d["next_cursor"]))'
 
 # Login and use the token
 TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
@@ -383,6 +414,45 @@ curl -s http://localhost:8000/api/health | python3 -m json.tool
 
 ---
 
+## 14. Cursor pagination
+
+The storefront loads products a batch at a time and keeps appending as you scroll. `GET
+/api/products` supports **both** styles: `page` for existing/legacy clients, `cursor` for the
+storefront. Responses always keep the original shape (`items`, `page`, `limit`, `total`, `pages`)
+and add two fields:
+
+| Field | Meaning |
+|---|---|
+| `next_cursor` | opaque Base64URL continuation token, or `null` on the last batch |
+| `has_more` | `true` only when a usable `next_cursor` was produced |
+
+```bash
+curl -s 'http://localhost:8000/api/products?limit=50' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["items"]), d["total"], d["has_more"], (d["next_cursor"] or "")[:24])'
+
+# follow it — no duplicates, ordering unchanged, `total`/`pages`/`limit` unaffected
+curl -s "http://localhost:8000/api/products?limit=50&cursor=$CURSOR"
+```
+
+Rules the endpoint guarantees:
+
+- The query is a single MongoDB `find` with **sort + cursor predicate + `limit+1`** — it never
+  fetches the whole result set and slices it in Java.
+- The cursor encodes the sort position *and* a fingerprint of the query
+  (`sort`, `visibility`, `category`, `tags`, `q`). Reusing it under a different query — or sending
+  a malformed/tampered one — returns **422 `invalid_cursor`**, never a 500.
+- It composes with every existing filter: `q`, `category`, `tags`, `sort`, `visibility`, `limit`.
+- An empty `cursor=` is treated as "no cursor" and returns the first batch.
+
+**Frontend behaviour** (`frontend/src/views/StorefrontView.vue`): an `IntersectionObserver` on a
+sentinel element with `rootMargin: '600px 0px'` requests the next batch; batches are *appended*
+with de-duplication by product `id`, never replaced. Changing `q`, `category` or `sort` discards
+the list **and** the cursor, and any in-flight append is dropped by a request-generation guard so a
+stale response can never land on screen. The only UI added is `Loading more products…` while a
+batch is in flight and `You've reached the end.` at the terminus — there is no page-number control
+on the storefront, and a legacy `?page=` link is stripped from the URL on load.
+
+---
+
 ## Project layout
 
 ```
@@ -398,10 +468,15 @@ backend/                 Java / Spring Boot API and RabbitMQ listener
     ├── products/        controllers, service, Mongo document + repository
     ├── search/          admin search controller, service, ES client
     ├── security/        JWT provider, authentication filter, 401/403 handlers
+    ├── products/seed/   deterministic 3,000-product generator + image pool (catalog profile)
+    ├── resources/catalog/image-pool.json  shared-artwork manifest
     └── SeedRunner.java  demo data + snapshot demo + ES reindex
 
 frontend/                Vue 3 application
 ├── Dockerfile           dev / prod (nginx) stages
+├── playwright.config.js end-to-end runner (npm run test:e2e)
+├── e2e/                 storefront infinite-scroll checks
+├── tests/               Vitest unit tests
 └── src/
     ├── api/             axios client + one module per resource
     ├── router/          routes and auth guards
@@ -410,5 +485,5 @@ frontend/                Vue 3 application
     ├── components/      common, storefront, checkout, auth, admin
     └── utils/           image, currency, dates, status, validation, debounce
 
-docker-compose.yml       all ten services
+docker-compose.yml       all eleven services
 ```

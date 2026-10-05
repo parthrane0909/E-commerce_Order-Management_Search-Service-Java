@@ -33,7 +33,7 @@
       </template>
     </EmptyState>
 
-    <div v-else class="product-grid__items">
+    <div v-else class="product-grid__items" data-testid="product-grid">
       <ProductCard
         v-for="product in items"
         :key="product.id"

@@ -1,0 +1,94 @@
+{
+  "_readme": [
+    "Reusable product-artwork pool for the catalog seed (Phase 5).",
+    "Every entry is a real file in frontend/public/products/ and is served by the",
+    "frontend bundle as /products/<file>. The seed only ever builds image_url values",
+    "from this manifest, and fails the run if a product category maps to a missing or",
+    "empty group. frontend/tests/image-pool.spec.js asserts that every file listed here",
+    "actually exists on disk, so the two artifacts cannot drift apart.",
+    "Images are intentionally shared between products - there are 51 assets for 3000+",
+    "products. Do not generate one image per product."
+  ],
+  "url_prefix": "/products/",
+  "default": "default.svg",
+  "groups": {
+    "tech": [
+      "BSP-001.svg", "CAM-001.svg", "CBL-001.svg", "CBL-002.svg", "CBL-003.svg",
+      "CBL-004.svg", "CBL-005.svg", "CBL-006.svg", "EAR-001.svg", "EAR-002.svg",
+      "HUB-001.svg", "KBD-002.svg", "MIC-001.svg", "MK-001.svg", "NCH-001.svg",
+      "PAD-001.svg", "PRS-001.svg", "SPK-001.svg", "VM-002.svg", "WM-001.svg"
+    ],
+    "peripherals": [
+      "WM-001.svg", "VM-002.svg", "MK-001.svg", "KBD-002.svg", "HUB-001.svg",
+      "PAD-001.svg", "PRS-001.svg", "CAM-001.svg"
+    ],
+    "audio": [
+      "EAR-001.svg", "EAR-002.svg", "NCH-001.svg", "SPK-001.svg", "MIC-001.svg",
+      "BSP-001.svg"
+    ],
+    "cables": [
+      "CBL-001.svg", "CBL-002.svg", "CBL-003.svg", "CBL-004.svg", "CBL-005.svg",
+      "CBL-006.svg"
+    ],
+    "office": [
+      "CHR-001.svg", "DSK-001.svg", "LMP-001.svg", "NBT-001.svg", "ORG-001.svg",
+      "STN-001.svg"
+    ],
+    "stationery": ["STA-001.svg", "NBT-001.svg", "ORG-001.svg"],
+    "networking": ["NET-001.svg", "CBL-004.svg", "HUB-001.svg"],
+    "storage": ["STO-001.svg", "HUB-001.svg", "CBL-003.svg"],
+    "gaming": ["GAM-001.svg", "PAD-001.svg", "KBD-002.svg", "MK-001.svg"],
+    "monitors": ["MON-001.svg", "STN-001.svg", "DSK-001.svg"],
+    "cameras": ["CAM-002.svg", "CAM-001.svg", "PRS-001.svg"],
+    "mobile-accessories": ["HUB-001.svg", "CBL-001.svg", "STO-001.svg", "EAR-001.svg"],
+    "kitchen": ["KTN-001.svg", "UTL-001.svg", "MUG-001.svg", "BWD-001.svg"],
+    "home": ["HOM-001.svg", "LMP-001.svg", "ORG-001.svg"],
+    "cleaning": ["CLN-001.svg", "BWD-001.svg"],
+    "lighting": ["LGT-001.svg", "LMP-001.svg"],
+    "furniture": ["FUR-001.svg", "CHR-001.svg", "DSK-001.svg", "STN-001.svg"],
+    "apparel": ["APP-001.svg", "BAG-001.svg"],
+    "footwear": ["SHO-001.svg", "BAG-001.svg"],
+    "bags": ["BAG-001.svg", "OUT-001.svg"],
+    "travel": ["BAG-001.svg", "OUT-001.svg"],
+    "fitness": ["FIT-001.svg", "OUT-001.svg"],
+    "beauty": ["BTY-001.svg", "DRY-001.svg"],
+    "toys": ["TOY-001.svg", "APP-001.svg"],
+    "outdoor": ["OUT-001.svg", "FIT-001.svg", "BAG-001.svg"],
+    "pets": ["PET-001.svg", "TOY-001.svg"],
+    "automotive": ["AUTO-001.svg", "CLN-001.svg"],
+    "default": ["default.svg"]
+  },
+  "category_groups": {
+    "peripherals": "peripherals",
+    "audio": "audio",
+    "cables": "cables",
+    "office": "office",
+    "electronics": "tech",
+    "computer-accessories": "tech",
+    "mobile-accessories": "mobile-accessories",
+    "networking": "networking",
+    "storage": "storage",
+    "gaming": "gaming",
+    "monitors": "monitors",
+    "cameras": "cameras",
+    "stationery": "stationery",
+    "kitchen": "kitchen",
+    "kitchenware": "kitchen",
+    "cookware": "kitchen",
+    "utensils": "kitchen",
+    "home": "home",
+    "cleaning": "cleaning",
+    "lighting": "lighting",
+    "furniture": "furniture",
+    "clothing": "apparel",
+    "footwear": "footwear",
+    "bags": "bags",
+    "travel": "travel",
+    "fitness": "fitness",
+    "personal-care": "beauty",
+    "toys": "toys",
+    "outdoor": "outdoor",
+    "pet-supplies": "pets",
+    "automotive": "automotive"
+  }
+}

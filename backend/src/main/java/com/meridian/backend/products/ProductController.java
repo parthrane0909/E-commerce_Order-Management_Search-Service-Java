@@ -34,9 +34,13 @@ public class ProductController {
             @RequestParam(defaultValue = "active") @Pattern(regexp = "^(active|inactive|all)$") String visibility,
             @RequestParam(defaultValue = "1") @Min(1) @Max(10000) int page,
             @RequestParam(defaultValue = "24") @Min(1) @Max(100) int limit,
-            @RequestParam(defaultValue = "newest") @Pattern(regexp = "^(newest|title_asc|price_asc|price_desc)$") String sort) {
+            @RequestParam(defaultValue = "newest") @Pattern(regexp = "^(newest|title_asc|price_asc|price_desc)$") String sort,
+            // Opaque continuation token. Not validated here: the service rejects malformed or
+            // stale cursors with 422 invalid_cursor, which is a client error, never a 500.
+            @RequestParam(required = false) String cursor) {
 
-        ProductListResponse response = productService.listProducts(category, tags, q, visibility, page, limit, sort);
+        ProductListResponse response =
+            productService.listProducts(category, tags, q, visibility, page, limit, sort, cursor);
         return ResponseEntity.ok(response);
     }
 

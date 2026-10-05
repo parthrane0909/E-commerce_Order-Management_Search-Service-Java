@@ -253,6 +253,45 @@ services:
       elasticsearch:
         condition: service_healthy
 
+  # ------------------------------------------------------------------
+  # One-shot catalog seeder: ~3000 diverse products straight into MongoDB.
+  #   docker compose build seed
+  #   docker compose --profile tools run --rm catalog-seed
+  # Idempotent (tops up to CATALOG_PRODUCT_COUNT), additive to the demo products,
+  # and exits 0 on success / 1 on failure. Opt-in destructive rebuild:
+  #   CATALOG_RESET=true docker compose --profile tools run --rm catalog-seed
+  # ------------------------------------------------------------------
+  catalog-seed:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-ecommerce}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+      MONGO_URI: mongodb://mongodb:27017
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-ecommerce}
+      RABBITMQ_DEFAULT_PASSWORD: ${RABBITMQ_DEFAULT_PASSWORD:-change_me_rabbit}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-ecommerce}:${RABBITMQ_DEFAULT_PASSWORD:-change_me_rabbit}@rabbitmq:5672/
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      CATALOG_PRODUCT_COUNT: ${CATALOG_PRODUCT_COUNT:-3000}
+      CATALOG_RESET: ${CATALOG_RESET:-false}
+    profiles: ["tools"]
+    command: java -jar app.jar --spring.profiles.active=catalog
+    networks: [app_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
 networks:
   app_net:
     driver: bridge

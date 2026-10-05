@@ -1,5 +1,11 @@
 <template>
-  <article class="product-card" :class="{ 'product-card--added': state === 'added' }">
+  <article
+    class="product-card"
+    :class="{ 'product-card--added': state === 'added' }"
+    :data-product-id="product.id"
+    :data-product-sku="product.sku"
+    data-testid="product-card"
+  >
     <div class="product-card__media">
       <ProductThumb :product="product" size="md" class="product-card__image" />
       <button

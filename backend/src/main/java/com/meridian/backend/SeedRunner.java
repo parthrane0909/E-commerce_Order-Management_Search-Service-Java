@@ -193,7 +193,17 @@ public class SeedRunner implements ApplicationRunner {
 
     private void seedProducts() {
         log.info("Seeding products...");
-        productRepository.deleteAll();
+        // Reset only the demo SKUs. deleteAll() here would also destroy the ~3000 rows written
+        // by the catalog seeder (products/seed/CatalogSeedRunner), making `seed` and
+        // `catalog-seed` order-dependent and silently emptying the storefront. The two
+        // namespaces never overlap: demo SKUs are 3-digit (WM-001), generated SKUs are 4-digit
+        // (KIT-1001).
+        List<String> demoSkus = PRODUCTS.stream()
+            .map(p -> (String) p.get("sku"))
+            .collect(Collectors.toList());
+        long removed = productRepository.deleteBySkuIn(demoSkus);
+        log.info("Removed {} existing demo product(s); {} other product(s) preserved",
+            removed, productRepository.count());
 
         OffsetDateTime now = DateUtils.utcNow();
         for (int i = 0; i < PRODUCTS.size(); i++) {

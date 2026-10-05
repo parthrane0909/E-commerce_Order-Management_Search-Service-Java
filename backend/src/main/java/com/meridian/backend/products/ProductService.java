@@ -9,9 +9,7 @@ import com.meridian.backend.products.dto.*;
 import com.meridian.backend.products.dto.ProductFacetsResponse.FacetBucket;
 import com.meridian.backend.products.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
+import org.bson.types.ObjectId;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.aggregation.Aggregation;
@@ -41,6 +39,27 @@ public class ProductService {
     private static final Set<String> VALID_CATEGORIES = Set.of("peripherals", "audio", "cables", "office");
     private static final Set<String> VALID_SORTS = Set.of("newest", "title_asc", "price_asc", "price_desc");
 
+    /**
+     * Product listing with cursor-based pagination.
+     *
+     * <p><b>Contract.</b> Every field the API already returned is still returned
+     * ({@code items, page, limit, total, pages}) — the two cursor fields are additive:
+     * {@code next_cursor} and {@code has_more}.
+     *
+     * <p><b>How a batch is fetched.</b> The query asks MongoDB for {@code limit + 1} rows with
+     * the filter, the cursor predicate and the deterministic sort applied. One extra row means
+     * "there is more", so no second query is needed just to decide that; the extra row is
+     * dropped before the response is built and its predecessor becomes the next cursor.
+     *
+     * <p><b>Why count is still separate.</b> {@code total}/{@code pages} describe the whole
+     * filtered result set, so they are counted from the filter alone — never from the cursor
+     * window — and they are counted on a <em>different</em> {@link Query} object. The previous
+     * implementation reused one {@code Query} for both calls and reset its own skip/limit while
+     * counting, which made every request return the entire result set regardless of
+     * {@code page}/{@code limit}.
+     *
+     * @param cursor opaque continuation token; {@code null}/blank means "first batch"
+     */
     public ProductListResponse listProducts(
             String category,
             List<String> tags,
@@ -48,76 +67,68 @@ public class ProductService {
             String visibility,
             int page,
             int limit,
-            String sort) {
+            String sort,
+            String cursor) {
 
         if (page < 1) page = 1;
         if (limit < 1) limit = 1;
         if (limit > 100) limit = 100;
         if (!VALID_SORTS.contains(sort)) sort = "newest";
 
-        Criteria criteria = new Criteria();
+        String normalisedCategory = (category == null || category.isEmpty()) ? "" : category.toLowerCase().trim();
+        String searchTerm = (q == null || q.trim().isEmpty()) ? "" : q.trim();
+        List<String> cleanTags = cleanTags(tags);
+        SortSpec sortSpec = sortSpec(sort);
 
-        if ("active".equals(visibility)) {
-            criteria.and("active").is(true);
-        } else if ("inactive".equals(visibility)) {
-            criteria.and("active").is(false);
+        // The cursor is only meaningful for the query it was issued against.
+        String fingerprint = ProductCursor.fingerprint(
+            sortSpec.key(), visibility, normalisedCategory, cleanTags, searchTerm);
+
+        // ---- count: the whole filtered set, cursor and windowing deliberately absent ----
+        List<Criteria> countMust = searchTerm.isEmpty() ? List.of() : List.of(searchCriteria(searchTerm));
+        long total = mongoTemplate.count(
+            Query.query(combine(filterCriteria(normalisedCategory, cleanTags, visibility), countMust)),
+            ProductDocument.class);
+
+        // ---- batch: filter + cursor + deterministic sort + (skip) + limit+1 ----
+        ProductCursor decoded = null;
+        if (cursor != null && !cursor.isBlank()) {
+            decoded = ProductCursor.decode(cursor, fingerprint, sortSpec);
         }
 
-        if (category != null && !category.isEmpty()) {
-            criteria.and("category").is(category.toLowerCase().trim());
+        List<Criteria> must = new ArrayList<>();
+        if (!searchTerm.isEmpty()) {
+            must.add(searchCriteria(searchTerm));
+        }
+        Criteria after = decoded == null ? null : continuationCriteria(sortSpec, decoded);
+        if (after != null) {
+            must.add(after);
         }
 
-        if (tags != null && !tags.isEmpty()) {
-            List<String> cleanTags = tags.stream()
-                .map(t -> t.trim().toLowerCase())
-                .filter(t -> !t.isEmpty())
-                .distinct()
-                .collect(Collectors.toList());
-            if (!cleanTags.isEmpty()) {
-                criteria.and("tags").all(cleanTags);
-            }
+        Query findQuery = Query.query(combine(filterCriteria(normalisedCategory, cleanTags, visibility), must))
+            .with(Sort.by(sortSpec.direction(), sortSpec.property())
+                .and(Sort.by(Sort.Direction.DESC, "_id")))
+            .skip(decoded == null ? (long) (page - 1) * limit : 0L)
+            .limit(limit + 1);
+
+        List<ProductDocument> documents = mongoTemplate.find(findQuery, ProductDocument.class);
+
+        boolean overflowed = documents.size() > limit;
+        if (overflowed) {
+            documents = new ArrayList<>(documents.subList(0, limit));
         }
-
-        if (q != null && !q.trim().isEmpty()) {
-            String searchTerm = q.trim();
-            Criteria textCriteria = new Criteria().orOperator(
-                Criteria.where("title").regex(searchTerm, "i"),
-                Criteria.where("description").regex(searchTerm, "i"),
-                Criteria.where("sku").regex(searchTerm, "i"),
-                Criteria.where("tags").regex(searchTerm, "i")
-            );
-            criteria.andOperator(textCriteria);
-        }
-
-        Sort.Direction direction = Sort.Direction.DESC;
-        String sortField = "createdAt";
-        switch (sort) {
-            case "title_asc":
-                direction = Sort.Direction.ASC;
-                sortField = "title";
-                break;
-            case "price_asc":
-                direction = Sort.Direction.ASC;
-                sortField = "price";
-                break;
-            case "price_desc":
-                direction = Sort.Direction.DESC;
-                sortField = "price";
-                break;
-            default:
-                direction = Sort.Direction.DESC;
-                sortField = "createdAt";
-        }
-
-        Pageable pageable = PageRequest.of(page - 1, limit, Sort.by(direction, sortField).and(Sort.by(Sort.Direction.DESC, "_id")));
-        Query query = Query.query(criteria).with(pageable);
-
-        long total = mongoTemplate.count(query.limit(-1).skip(-1), ProductDocument.class);
-        List<ProductDocument> documents = mongoTemplate.find(query, ProductDocument.class);
 
         List<ProductResponse> items = documents.stream()
             .map(this::toResponse)
             .collect(Collectors.toList());
+
+        String nextCursor = overflowed && !documents.isEmpty()
+            ? ProductCursor.encode(sortSpec, fingerprint, documents.get(documents.size() - 1))
+            : null;
+        // has_more is only true when a usable cursor was produced: with has_more=true and a
+        // null cursor the client would have nothing to ask for, so a missing timestamp can
+        // never leave it polling into an empty window.
+        boolean hasMore = nextCursor != null;
 
         int pages = total == 0 ? 0 : (int) Math.ceil((double) total / limit);
 
@@ -127,7 +138,95 @@ public class ProductService {
             .limit(limit)
             .total((int) total)
             .pages(pages)
+            .nextCursor(hasMore ? nextCursor : null)
+            .hasMore(hasMore)
             .build();
+    }
+
+    /** The filters every listing mode shares — never the search term, never the cursor. */
+    private Criteria filterCriteria(String normalisedCategory, List<String> cleanTags, String visibility) {
+        Criteria criteria = new Criteria();
+
+        if ("active".equals(visibility)) {
+            criteria.and("active").is(true);
+        } else if ("inactive".equals(visibility)) {
+            criteria.and("active").is(false);
+        }
+
+        if (normalisedCategory != null && !normalisedCategory.isEmpty()) {
+            criteria.and("category").is(normalisedCategory);
+        }
+
+        if (cleanTags != null && !cleanTags.isEmpty()) {
+            criteria.and("tags").all(cleanTags);
+        }
+
+        return criteria;
+    }
+
+    private List<String> cleanTags(List<String> tags) {
+        if (tags == null) return List.of();
+        return tags.stream()
+            .map(t -> t == null ? "" : t.trim().toLowerCase())
+            .filter(t -> !t.isEmpty())
+            .distinct()
+            .collect(Collectors.toList());
+    }
+
+    /** Case-insensitive regex over the four text fields — unchanged from the original listing. */
+    private Criteria searchCriteria(String searchTerm) {
+        return new Criteria().orOperator(
+            Criteria.where("title").regex(searchTerm, "i"),
+            Criteria.where("description").regex(searchTerm, "i"),
+            Criteria.where("sku").regex(searchTerm, "i"),
+            Criteria.where("tags").regex(searchTerm, "i")
+        );
+    }
+
+    /**
+     * Applies {@code must} to {@code base} with a <b>single</b> {@code $and}. One call keeps the
+     * rendered document in the shape the rest of this service already relies on (direct filters
+     * plus one {@code $and} array), so search, category, tags, visibility and the cursor all
+     * coexist without one overwriting another.
+     */
+    private Criteria combine(Criteria base, List<Criteria> must) {
+        if (!must.isEmpty()) {
+            base.andOperator(must.toArray(new Criteria[0]));
+        }
+        return base;
+    }
+
+    /**
+     * "Everything strictly after the cursor row, in the exact order being paged."
+     *
+     * <p>Because every sort appends {@code _id DESC}, the continuation is:
+     * primary field past the last value, <em>or</em> primary field equal and {@code _id} lower.
+     * Duplicated prices and duplicated titles therefore cannot skip or repeat a row.
+     */
+    private Criteria continuationCriteria(SortSpec spec, ProductCursor decoded) {
+        String field = decoded.getSortField();
+        Object value = decoded.getSortValue();
+
+        Criteria tieBreaker = new Criteria().andOperator(
+            Criteria.where(field).is(value),
+            Criteria.where("_id").lt(new ObjectId(decoded.getId()))
+        );
+
+        Criteria primary = decoded.isAscending()
+            ? Criteria.where(field).gt(value)
+            : Criteria.where(field).lt(value);
+
+        return new Criteria().orOperator(primary, tieBreaker);
+    }
+
+    /** Maps the public {@code ?sort=} key onto the property/mongo-field pair it pages by. */
+    private SortSpec sortSpec(String sort) {
+        return switch (sort == null ? "newest" : sort) {
+            case "title_asc" -> new SortSpec("title_asc", "title", "title", Sort.Direction.ASC);
+            case "price_asc" -> new SortSpec("price_asc", "price", "price", Sort.Direction.ASC);
+            case "price_desc" -> new SortSpec("price_desc", "price", "price", Sort.Direction.DESC);
+            default -> new SortSpec("newest", "createdAt", "created_at", Sort.Direction.DESC);
+        };
     }
 
     public ProductFacetsResponse listFacets() {

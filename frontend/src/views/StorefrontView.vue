@@ -84,18 +84,23 @@
         :error="error"
         @add="addToCart"
         @clear="resetFilters"
-        @retry="load"
+        @retry="loadFirstBatch"
       />
 
-      <AppPagination
-        v-if="products.pages > 1"
-        :page="page"
-        :pages="products.pages"
-        :total="products.total"
-        :loading="loading"
-        item-label="products"
-        @update:page="setPage"
-      />
+      <!--
+        Infinite-scroll sentinel. It is always rendered (only its content toggles) so the
+        IntersectionObserver stays bound to one stable node across filter changes.
+        Minimal status copy only: loading more, or the end of the results.
+      -->
+      <div
+        ref="loadMoreSentinel"
+        class="collection__sentinel"
+        data-testid="load-more-sentinel"
+        aria-live="polite"
+      >
+        <span v-if="loadingMore" data-testid="loading-more">Loading more products…</span>
+        <span v-else-if="endOfResults" data-testid="end-of-results">You’ve reached the end.</span>
+      </div>
     </section>
 
     <!-- Promotional band -->
@@ -114,12 +119,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/common/AppIcon.vue'
 import ProductFilters from '../components/storefront/ProductFilters.vue'
 import ProductGrid from '../components/storefront/ProductGrid.vue'
-import AppPagination from '../components/common/AppPagination.vue'
 import HeroSection from '../components/storefront/HeroSection.vue'
 import CategorySection from '../components/storefront/CategorySection.vue'
 import TagMarquee from '../components/storefront/TagMarquee.vue'
@@ -132,7 +136,11 @@ const router = useRouter()
 const cart = useCartStore()
 const toast = useToastStore()
 
+/** Batch size. One request fills three rows of the four-up grid, then scrolling appends. */
 const PAGE_SIZE = 12
+
+/** How far ahead of the viewport the next batch is requested — feels instant, costs one call. */
+const SENTINEL_ROOT_MARGIN = '600px 0px'
 
 const promos = [
   { icon: 'truck', title: 'Free shipping', text: 'On every order over ₹5,000' },
@@ -141,31 +149,48 @@ const promos = [
   { icon: 'box', title: 'Fast dispatch', text: 'Packed within one working day' },
 ]
 
-function parseIntQuery(value) {
-  const parsed = parseInt(String(value || ''), 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
-}
-
-// URL-driven filter state — single source of truth
+// URL-driven filter state — single source of truth.
+// There is no page state any more: the listing is cursor-paginated, so the URL only
+// carries the query (q / category / sort). Legacy `?page=` links are stripped on mount.
 const category = ref(String(route.query.category || ''))
 const sort = ref(String(route.query.sort || 'newest'))
-const page = ref(parseIntQuery(route.query.page))
 
 const facets = ref({ categories: [], tags: [] })
 const facetsLoading = ref(false)
 const facetsError = ref('')
 
 const products = ref({ items: [], total: 0, pages: 0, page: 1, limit: PAGE_SIZE })
+
+/** Opaque continuation token for the next batch; null means we cannot ask for more. */
+const nextCursor = ref(null)
+/** Server's "another batch exists" flag. Drives the sentinel and the end-of-results copy. */
+const hasMore = ref(false)
+/** First batch / filter reset → the grid skeleton. Never true while appending. */
 const loading = ref(false)
+/** Appending → the inline "Loading more products…" line. The grid stays on screen. */
+const loadingMore = ref(false)
 const error = ref('')
-let requestId = 0
+
+/**
+ * Request bookkeeping. Every fetch stamps the generation it belongs to and takes the
+ * newest sequence number; a response is applied only if both still match. That single
+ * rule drops late responses from a filter the user already changed away from, and stops
+ * two overlapping loads from interleaving.
+ */
+let generation = 0
+let requestSeq = 0
+/** Folds the duplicate triggers a single user action can raise (route sync + local handler). */
 let inFlightKey = ''
 
 const searchTerm = computed(() => String(route.query.q || '').trim())
 
 const routeCategory = computed(() => String(route.query.category || ''))
 const routeSort = computed(() => String(route.query.sort || 'newest'))
-const routePage = computed(() => parseIntQuery(route.query.page))
+
+/** True once nothing more can be appended and there is something on screen to say it about. */
+const endOfResults = computed(
+  () => !loading.value && !loadingMore.value && products.value.items.length > 0 && !hasMore.value,
+)
 
 function prettyCategory(value) {
   const raw = String(value || '')
@@ -191,48 +216,38 @@ watch(routeSort, (value) => {
   if (value !== sort.value) sort.value = value
 })
 
-watch(routePage, (value) => {
-  if (value !== page.value) page.value = value
-})
-
 /* ---------------- local controls ---------------- */
 
 function onCategoryChange(value) {
   category.value = value
-  pushQuery({ category: value || undefined, page: undefined })
+  pushQuery({ category: value || undefined })
   scrollToCollection()
 }
 
 function onSortChange(value) {
   sort.value = value
-  pushQuery({ sort: value === 'newest' ? undefined : value, page: undefined })
+  pushQuery({ sort: value === 'newest' ? undefined : value })
 }
 
 function clearQuery(key) {
   if (key === 'q') {
-    pushQuery({ q: undefined, page: undefined })
+    pushQuery({ q: undefined })
     return
   }
   if (key === 'category') {
     category.value = ''
-    pushQuery({ category: undefined, page: undefined })
+    pushQuery({ category: undefined })
   }
-}
-
-function setPage(nextPage) {
-  page.value = nextPage
-  pushQuery({ page: nextPage > 1 ? nextPage : undefined })
-  scrollToCollection()
 }
 
 function resetFilters() {
   category.value = ''
   sort.value = 'newest'
   router.replace({ query: {} }).catch(() => {})
-  // When the query was already empty this replace is a duplicate navigation,
-  // so no watcher fires — nudge a reload (empty-catalog edge case). Overlapping
-  // watcher loads are folded together by the in-flight guard in load().
-  if (page.value === 1) load()
+  // When the query was already empty this replace is a duplicate navigation, so the
+  // filter watcher never fires — load directly. Duplicate triggers in one tick are
+  // folded together by the in-flight key guard in loadFirstBatch().
+  loadFirstBatch()
 }
 
 function scrollToCollection() {
@@ -244,42 +259,141 @@ function scrollToCollection() {
   window.scrollTo({ top, behavior })
 }
 
+/* ---------------- infinite scroll ---------------- */
+
+const loadMoreSentinel = ref(null)
+let observer = null
+/** Whether the sentinel currently sits inside the root margin — checked before every load. */
+let sentinelVisible = false
+
+function observeSentinel() {
+  if (observer) observer.disconnect()
+  sentinelVisible = false
+  if (typeof IntersectionObserver === 'undefined') return
+  observer = new IntersectionObserver(
+    (entries) => {
+      sentinelVisible = entries.some((entry) => entry.isIntersecting)
+      if (sentinelVisible) loadMore()
+    },
+    { rootMargin: SENTINEL_ROOT_MARGIN },
+  )
+  if (loadMoreSentinel.value) observer.observe(loadMoreSentinel.value)
+}
+
+function disconnectSentinel() {
+  if (observer) observer.disconnect()
+  observer = null
+  sentinelVisible = false
+}
+
+/**
+ * Appends the next batch. Never replaces, never runs twice at once, and only fires
+ * when the server actually gave us a continuation token.
+ */
+async function loadMore() {
+  if (loading.value || loadingMore.value) return
+  if (!hasMore.value || !nextCursor.value) return
+  await fetchBatch({ reset: false })
+}
+
 /* ---------------- fetching ---------------- */
 
-async function load() {
-  const params = {
-    page: page.value,
-    limit: PAGE_SIZE,
-    sort: sort.value,
-    visibility: 'active',
-  }
+function buildParams() {
+  const params = { limit: PAGE_SIZE, sort: sort.value, visibility: 'active' }
   const term = route.query.q?.trim()
   if (term) params.q = term
   if (category.value) params.category = category.value
+  return params
+}
 
-  // Route sync and the filter watchers can both request the same fetch in one
-  // tick (e.g. "Reset filters") — share the request already in flight.
-  const key = JSON.stringify(params)
+/**
+ * The only fetch path. `reset` starts a fresh result set (list is cleared by the
+ * caller); otherwise the batch is appended to whatever is already on screen.
+ */
+async function fetchBatch({ reset }) {
+  const stamp = generation
+  const seq = (requestSeq += 1)
+
+  const params = buildParams()
+  if (!reset && nextCursor.value) params.cursor = nextCursor.value
+
+  if (reset) {
+    loading.value = true
+    error.value = ''
+  } else {
+    loadingMore.value = true
+  }
+
+  try {
+    const data = await listProducts(params)
+    // A newer request owns the UI — drop this response on the floor.
+    if (stamp !== generation || seq !== requestSeq) return
+
+    const incoming = (data.items || []).filter(
+      (item) => item && (item.id || item.sku) && !seenIds().has(item.id || item.sku),
+    )
+
+    products.value = {
+      ...data,
+      items: reset ? (data.items || []) : [...products.value.items, ...incoming],
+    }
+    nextCursor.value = data.next_cursor || null
+    hasMore.value = Boolean(data.has_more) && Boolean(data.next_cursor)
+    error.value = ''
+
+    // The observer only reports *crossings*. If the sentinel was already inside the
+    // band when this batch landed (tall viewport / short first page), nudge it once so
+    // loading continues until the sentinel actually leaves the band. The "grew" check
+    // is what stops a batch of nothing from spinning forever.
+    const grew = reset ? products.value.items.length > 0 : incoming.length > 0
+    if (grew && sentinelVisible && hasMore.value) {
+      nextTick(() => loadMore())
+    }
+  } catch (requestError) {
+    if (stamp !== generation || seq !== requestSeq) return
+    const code = requestError?.response?.data?.error?.code
+    if (!reset && code === 'invalid_cursor') {
+      // The cursor no longer matches the query. Discard it and restart cleanly
+      // instead of stranding the user on a dead end.
+      nextCursor.value = null
+      hasMore.value = false
+      loadFirstBatch()
+      return
+    }
+    error.value = requestError?.message || 'Could not load products.'
+  } finally {
+    if (stamp === generation && seq === requestSeq) {
+      loading.value = false
+      loadingMore.value = false
+    }
+  }
+}
+
+function seenIds() {
+  const seen = new Set()
+  for (const item of products.value.items) {
+    const key = item && (item.id || item.sku)
+    if (key) seen.add(key)
+  }
+  return seen
+}
+
+/** Clears the list and the cursor, then loads the first batch for the current query. */
+async function loadFirstBatch() {
+  const key = JSON.stringify(buildParams())
   if (loading.value && key === inFlightKey) return
   inFlightKey = key
 
-  const id = (requestId += 1)
-  loading.value = true
-  error.value = ''
-  try {
-    const data = await listProducts(params)
-    if (id !== requestId) return
-    products.value = data
+  generation += 1
+  nextCursor.value = null
+  hasMore.value = true
+  loadingMore.value = false
+  products.value = { items: [], total: 0, pages: 0, page: 1, limit: PAGE_SIZE }
 
-    if (!data.items.length && page.value > 1) {
-      page.value = 1
-    }
-  } catch (requestError) {
-    if (id !== requestId) return
-    error.value = requestError?.message || 'Could not load products.'
-  } finally {
-    if (id === requestId) loading.value = false
-  }
+  // Re-binding the observer re-runs its first callback against the current layout,
+  // so a changed query always re-evaluates whether more results are needed.
+  observeSentinel()
+  await fetchBatch({ reset: true })
 }
 
 async function loadFacets() {
@@ -294,15 +408,18 @@ async function loadFacets() {
   }
 }
 
-// Any filter change reloads (resets to page 1); page changes reload too.
-watch([() => route.query.q, category, sort], () => {
-  if (page.value !== 1) page.value = 1
-  else load()
+// Any filter change discards the list, the cursor and any in-flight append, then
+// restarts from the first batch. The cursor is never carried across a query change.
+watch([() => route.query.q, category, sort], loadFirstBatch, { immediate: true })
+
+onMounted(() => {
+  // Page numbers are history — drop them so the URL only ever carries filters.
+  if (route.query.page !== undefined) pushQuery({ page: undefined })
+  observeSentinel()
+  loadFacets()
 })
 
-watch(page, load, { immediate: true })
-
-onMounted(loadFacets)
+onBeforeUnmount(disconnectSentinel)
 
 function addToCart(product) {
   cart.add(product)
@@ -416,6 +533,19 @@ function addToCart(product) {
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+/* Scroll sentinel — reserves a little space so the layout never jumps when the
+   status line swaps between loading and end-of-results. */
+.collection__sentinel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  margin-top: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-align: center;
 }
 
 .chip {

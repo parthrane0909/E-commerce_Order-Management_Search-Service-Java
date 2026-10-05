@@ -7,6 +7,7 @@ import org.springframework.data.mongodb.repository.MongoRepository;
 import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,4 +29,14 @@ public interface ProductRepository extends MongoRepository<ProductDocument, Stri
 
     @Query("{ '_id': { $in: ?0 } }")
     List<ProductDocument> findByIds(List<String> ids);
+
+    /**
+     * Deletes only the given SKUs.
+     *
+     * <p>Used by {@code SeedRunner} instead of {@code deleteAll()}: the demo reset must refresh
+     * the 27 demo products without wiping the thousands of rows written by the catalog seeder
+     * ({@code CatalogSeedRunner}), so the demo and generated catalogs can coexist and be seeded
+     * in either order.
+     */
+    long deleteBySkuIn(Collection<String> skus);
 }

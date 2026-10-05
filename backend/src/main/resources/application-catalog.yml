@@ -1,0 +1,22 @@
+# Profile for the one-shot catalog seeder (products/seed/CatalogSeedRunner).
+#
+# Activated ONLY by `docker compose --profile tools run --rm catalog-seed`
+# (command: java -jar app.jar --spring.profiles.active=catalog). It is never part of
+# a normal `docker compose up`, so the ~3000 generated products are never recreated
+# on application startup.
+spring:
+  rabbitmq:
+    listener:
+      # The seeder is not an order-sync consumer. Suppressing the listener keeps it from
+      # pulling a message off orders_sync right before the JVM shuts down.
+      simple:
+        auto-startup: false
+
+app:
+  catalog:
+    # How many generated products the catalog should hold. The seeder tops up to this
+    # number rather than inserting it blindly, so re-running is a no-op.
+    target-products: ${CATALOG_PRODUCT_COUNT:3000}
+    # Destructive, opt-in only: deletes the generated slice (never the demo products)
+    # and rebuilds it from scratch.
+    reset: ${CATALOG_RESET:false}
