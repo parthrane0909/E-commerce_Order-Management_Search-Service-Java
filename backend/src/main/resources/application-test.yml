@@ -1,0 +1,55 @@
+# Test Profile Configuration
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+  
+  # Use Testcontainers for integration tests
+  datasource:
+    url: jdbc:tc:postgresql:16-alpine:///ecommerce
+    username: ecommerce
+    password: ecommerce
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+  
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017
+      database: catalog_test
+      auto-index-creation: true
+  
+  elasticsearch:
+    uris: http://localhost:9200
+  
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: ecommerce
+    password: ecommerce
+
+app:
+  jwt:
+    secret: test-secret-key-for-testing-purposes-only-must-be-long-enough
+    expiration-minutes: 1440
+  
+  uploads:
+    dir: /tmp/uploads-test
+  
+  cors:
+    allowed-origins: http://localhost:5173
+
+# Disable actuator in tests
+management:
+  endpoints:
+    web:
+      exposure:
+        include: none
+
+logging:
+  level:
+    com.meridian.backend: WARN
+    org.springframework: WARN
+    org.hibernate: WARN

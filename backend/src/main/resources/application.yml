@@ -1,0 +1,136 @@
+# Meridian Backend - Main Configuration
+# Environment-specific overrides in application-dev.yml and application-test.yml
+
+spring:
+  application:
+    name: meridian-backend
+   
+  # Jackson configuration for API compatibility
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+    mapper:
+      accept-case-insensitive-enums: true
+   
+  # PostgreSQL - Source of Truth for Orders
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:ecommerce}
+    username: ${POSTGRES_USER:ecommerce}
+    password: ${POSTGRES_PASSWORD:ecommerce}
+    hikari:
+      maximum-pool-size: ${POSTGRES_POOL_SIZE:5}
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+   
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: UTC
+    open-in-view: false
+    show-sql: false
+   
+  # MongoDB - Product Catalog
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI:${MONGO_URI:mongodb://mongodb:27017}}
+      database: ${MONGO_DB:catalog}
+      auto-index-creation: true
+
+  # Elasticsearch - Search Projection
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URL:http://localhost:9200}
+    connection-timeout: 10s
+    socket-timeout: 60s
+   
+  # RabbitMQ - Message Broker
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_DEFAULT_USER:ecommerce}
+    password: ${RABBITMQ_DEFAULT_PASSWORD:ecommerce}
+    virtual-host: /
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        acknowledge-mode: auto
+        prefetch: 1
+        concurrency: 2
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          initial-interval: 10s
+          multiplier: 2
+          max-interval: 120s
+          max-attempts: 5
+   
+  # File Upload
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
+      file-size-threshold: 1MB
+
+# Application-specific properties
+app:
+  jwt:
+    secret: ${JWT_SECRET_KEY:change-me-in-production-use-a-long-random-string}
+    algorithm: HS256
+    expiration-minutes: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:1440}
+   
+  uploads:
+    dir: ${UPLOADS_DIR:/app/uploads}
+   
+  cors:
+    allowed-origins: ${CORS_ORIGINS:http://localhost:5173}
+   
+  elasticsearch:
+    index: ${ELASTICSEARCH_INDEX:orders}
+    refresh-on-write: ${ELASTICSEARCH_REFRESH_ON_WRITE:true}
+   
+  rabbitmq:
+    sync-queue: ${RABBITMQ_SYNC_QUEUE:orders_sync}
+
+# Actuator / Health
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    defaults:
+      enabled: false
+    db:
+      enabled: true
+    mongo:
+      enabled: false
+    elasticsearch:
+      enabled: true
+    rabbit:
+      enabled: true
+
+# Logging
+logging:
+  level:
+    com.meridian.backend: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.web: DEBUG
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
